@@ -9,6 +9,25 @@ A Claude Code skill for finding academic papers via [DBLP](https://dblp.org/) wi
 - **Automatic save** to `.md` (literature review) and `.bib` (BibTeX)
 - **Polite rate-limiting** — 1.5s delay between DBLP requests to avoid 429 errors
 
+## Natural Language Examples
+
+Use the skill when you want to find papers. Here are example prompts:
+
+```
+find papers about LLM for software testing, only CCF-A venues in recent 3 years
+search for papers on requirements validation, CCF-A and CCF-B in software engineering, last 5 years
+find papers about AI for requirements engineering, save as md and bibtex
+search DBLP for deep learning testing, only CCF-B conferences
+literature review on model-based testing, CCF-A software engineering, 2020-2025
+find papers about automated requirements engineering, save results
+search for papers on formal requirements verification, CCF-A, last 4 years
+```
+
+When you invoke the skill with one of these prompts, it will:
+1. Infer the topic, CCF category, rank, and year range
+2. Search DBLP and filter by the correct venues
+3. Generate a `.md` + `.bib` report saved to your home directory
+
 ## Quick Start
 
 ```bash

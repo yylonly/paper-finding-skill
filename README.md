@@ -2,6 +2,20 @@
 
 A Claude Code skill for finding academic papers via [DBLP](https://dblp.org/) with CCF ranking filtering, IEEE reference generation, and automatic save to `.md` + `.bib`.
 
+## Installation
+
+Install using the `skills` CLI:
+
+```bash
+# Install globally (recommended)
+npx skills add yylonly/paper-finding --global
+
+# Or install locally in current project
+npx skills add yylonly/paper-finding
+```
+
+For more commands, see `npx skills --help`.
+
 ## Features
 
 - **DBLP search** with CCF-A/B filtering for Software Engineering and AI venues

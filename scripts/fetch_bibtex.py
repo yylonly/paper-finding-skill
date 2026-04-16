@@ -1,139 +1,349 @@
 #!/usr/bin/env python3
 """
-Fetch BibTeX entries from DBLP by DBLP key or from a list of keys.
+Step 2: Fetch BibTeX entries for a list of papers.
+Input: JSON file from search_dblp.py (or individual DOI URLs)
+Output: .bib file with all BibTeX entries
+
+Workflow:
+    DOI from input
+      → IEEE via Playwright (Cite This → BibTeX tab)  [if --ieee]
+      → CrossRef API by DOI  [primary, always tried]
+      → DBLP .bib endpoint   [fallback]
 
 Usage:
-    python3 fetch_bibtex.py conf/icse/Pan024
-    python3 fetch_bibtex.py conf/icse/Pan024 conf/icse/ChangGY23 conf/icse/MashkoorLE21
-    python3 fetch_bibtex.py --file keys.txt
-    python3 fetch_bibtex.py --search "requirements validation" --venue ICSE --year 2024
+    # From JSON file (output of search_dblp.py --json):
+    python3 fetch_bibtex.py papers.json -o refs.bib
+
+    # Individual DOIs:
+    python3 fetch_bibtex.py https://doi.org/10.1109/RE.2024.00011 -o refs.bib
+
+    # With IEEE Playwright:
+    python3 fetch_bibtex.py papers.json --ieee -o refs.bib -v
 """
 
 import argparse
+import json
 import subprocess
 import sys
 import urllib.parse
-import json
+import urllib.request
+import re
+import time
+
+# Playwright support (optional)
+try:
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
 
 
-def fetch_bibtex(dblp_key: str, raw: bool = False) -> str:
-    """Fetch BibTeX for a single DBLP key. Returns empty string on failure."""
-    url = f'https://dblp.org/rec/bib/{dblp_key}.bib'
-    r = subprocess.run(['curl', '-sL', url], capture_output=True)
-    return r.stdout.decode('utf-8', errors='replace') if isinstance(r.stdout, bytes) else r.stdout
+# ===== CrossRef =====
 
-
-def fetch_json(dblp_key: str) -> dict:
-    """Fetch DBLP JSON for a single key. Returns empty dict on failure."""
-    url = f'https://dblp.org/rec/{dblp_key}.json'
-    r = subprocess.run(['curl', '-s', url], capture_output=True)
+def fetch_bibtex_from_crossref(doi: str, timeout: int = 15) -> tuple:
+    """Fetch BibTeX from CrossRef API. Returns (bibtex_str, success)."""
+    if not doi:
+        return '', False
     try:
-        return json.loads(r.stdout)
-    except:
-        return {}
+        url = f'https://api.crossref.org/works/{doi}'
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read())['message']
+
+            ctype = 'inproceedings'
+            if data.get('type') in ('journal-article', 'journal-issue'):
+                ctype = 'article'
+
+            authors_list = []
+            for a in data.get('author', []):
+                name = (a.get('given', '') + ' ' + a.get('family', '')).strip()
+                authors_list.append(name)
+
+            title = data.get('title', [''])[0] if data.get('title') else ''
+            container = data.get('container-title', [''])[0] if data.get('container-title') else ''
+            volume = data.get('volume', '')
+            issue = data.get('issue', '')
+            pages = data.get('page', '')
+            year_obj = data.get('published-print', data.get('published-online', {}))
+            year = ''
+            if isinstance(year_obj, dict):
+                parts = year_obj.get('date-parts', [['']])
+                year = str(parts[0][0]) if parts and parts[0] else ''
+            publisher = data.get('publisher', '')
+            url2 = data.get('URL', f'https://doi.org/{doi}')
+
+            key_base = re.sub(r'[^a-zA-Z0-9]', '', doi.split('/')[-1]) if '/' in doi else doi
+
+            lines = [f'@{ctype}{{{key_base},']
+            lines.append(f'  author       = {{{" and ".join(authors_list)}}},')
+            lines.append(f'  title        = {{{title}}},')
+            if container:
+                lines.append(f'  booktitle    = {{{container}}},')
+            if volume:
+                lines.append(f'  volume       = {{{volume}}},')
+            if issue:
+                lines.append(f'  number       = {{{issue}}},')
+            if pages:
+                lines.append(f'  pages        = {{{pages}}},')
+            if year:
+                lines.append(f'  year         = {{{year}}},')
+            if publisher:
+                lines.append(f'  publisher    = {{{publisher}}},')
+            lines.append(f'  doi          = {{{doi}}},')
+            lines.append(f'  url          = {{{url2}}},')
+            lines.append('}')
+
+            return '\n'.join(lines), True
+    except Exception as e:
+        return '', False
 
 
-def get_page_count(dblp_key: str) -> tuple:
-    """Get page range for a paper. Returns (start_page, end_page, total_pages)."""
-    data = fetch_json(dblp_key)
+# ===== DBLP fallback =====
+
+def fetch_bibtex_from_dblp(dblp_key: str, timeout: int = 15) -> tuple:
+    """Fetch BibTeX from DBLP .bib endpoint. Returns (bibtex_str, success)."""
     try:
-        result = data.get('result', {})
-        data_obj = result.get('data', {})
-        if isinstance(data_obj, dict):
-            pages_str = data_obj.get('pages', '') or data_obj.get('page', '')
-            if pages_str:
-                if '-' in str(pages_str):
-                    parts = str(pages_str).split('-')
-                    start = int(parts[0])
-                    end = int(parts[1])
-                    return start, end, end - start + 1
-                else:
-                    return int(pages_str), int(pages_str), 1
-    except:
-        pass
-    return None, None, None
+        url = f'https://dblp.org/rec/{dblp_key}.bib'
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.37'
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            bib = r.read().decode('utf-8', errors='replace')
+            if bib.strip().startswith('@'):
+                return bib.strip(), True
+            return '', False
+    except Exception:
+        return '', False
 
 
-def search_and_fetch_bibtex(query: str, venue: str = None, year: str = None, max_results: int = 10) -> list:
-    """Search DBLP and fetch BibTeX for top results."""
-    q = query
-    if venue:
-        q = f"venue:{venue} {q}"
-    if year:
-        q = f"{q} year:{year}"
+# ===== IEEE via Playwright =====
 
-    encoded_q = urllib.parse.quote(q)
-    r = subprocess.run(
-        ['curl', '-s', f'https://dblp.org/search/publ/api?q={encoded_q}&format=json&h={max_results}'],
-        capture_output=True
-    )
+def fetch_bibtex_from_ieee(doi: str, timeout: int = 60) -> tuple:
+    """
+    Fetch BibTeX from IEEE Xplore via Playwright.
+    Navigates to https://doi.org/{doi}, clicks Cite This → BibTeX tab.
+    Returns (bibtex_str, success).
+    """
+    if not PLAYWRIGHT_AVAILABLE or not doi:
+        return '', False
+
     try:
-        data = json.loads(r.stdout)
-        hits = data.get('result', {}).get('hits', {}).get('hit', [])
-        results = []
-        for hit in hits:
-            key = hit['info'].get('url', '').replace('https://dblp.org/rec/', '')
-            bib = fetch_bibtex(key, raw=True)
-            results.append({'key': key, 'bib': bib, 'info': hit['info']})
-        return results
-    except:
-        return []
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=False)
+            page = browser.new_page()
 
+            page.goto(f"https://doi.org/{doi}", wait_until="load", timeout=timeout * 1000)
+            page.wait_for_timeout(5000)
+
+            # Check redirect worked
+            if '/document/' not in page.url:
+                browser.close()
+                return '', False
+
+            # Click Cite This
+            try:
+                page.get_by_text("Cite This").click(force=True, timeout=5000)
+            except Exception:
+                browser.close()
+                return '', False
+            page.wait_for_timeout(3000)
+
+            # Click BibTeX tab
+            try:
+                page.get_by_text("BibTeX", exact=True).click(timeout=5000)
+            except Exception:
+                browser.close()
+                return '', False
+            page.wait_for_timeout(2000)
+
+            # Extract from textarea or pre
+            bibtex = ''
+            for tag in ['textarea', 'pre']:
+                elems = page.locator(tag)
+                for j in range(elems.count()):
+                    txt = elems.nth(j).inner_text()
+                    if '@' in txt:
+                        bibtex = txt.strip()
+                        break
+                if bibtex:
+                    break
+
+            browser.close()
+            return bibtex, bool(bibtex)
+    except Exception:
+        return '', False
+
+
+# ===== Main fetch logic =====
+
+def extract_doi_from_url(url: str) -> str:
+    """Extract DOI from a doi.org URL."""
+    if not url:
+        return ''
+    # https://doi.org/10.1109/RE.2024.00011 → 10.1109/RE.2024.00011
+    m = re.search(r'doi\.org/(10\.\S+)', url)
+    if m:
+        return m.group(1).rstrip('/')
+    return ''
+
+
+def fetch_bibtex_for_doi(doi: str, use_ieee: bool = False, delay: float = 0.3) -> tuple:
+    """
+    Fetch BibTeX for a single DOI.
+    Tries: IEEE (Playwright) → CrossRef → DBLP
+    Returns (bibtex_str, source_str).
+    """
+    if not doi:
+        return '', 'no_doi'
+
+    # IEEE via Playwright (if enabled)
+    if use_ieee:
+        bib, ok = fetch_bibtex_from_ieee(doi)
+        if ok:
+            return bib, 'ieee'
+
+    # CrossRef
+    bib, ok = fetch_bibtex_from_crossref(doi)
+    if ok:
+        return bib, 'crossref'
+
+    return '', 'not_found'
+
+
+def load_papers_from_json(path: str) -> list:
+    """Load papers from JSON file (output of search_dblp.py --json)."""
+    with open(path) as f:
+        data = json.load(f)
+    if isinstance(data, list):
+        return data
+    return []
+
+
+# ===== CLI =====
 
 def main():
-    parser = argparse.ArgumentParser(description='Fetch BibTeX from DBLP')
-    parser.add_argument('keys', nargs='*', help='DBLP keys to fetch')
-    parser.add_argument('--file', '-f', help='File containing DBLP keys (one per line)')
-    parser.add_argument('--search', '-s', help='Search query to find keys first')
-    parser.add_argument('--venue', help='Restrict search to venue')
-    parser.add_argument('--year', type=int, help='Restrict search to year')
-    parser.add_argument('--raw', action='store_true', help='Raw BibTeX without cleanup')
-    parser.add_argument('--pages', action='store_true', help='Also show page count')
-    parser.add_argument('--output', '-o', help='Output file (default: stdout)')
+    parser = argparse.ArgumentParser(
+        description='Fetch BibTeX for papers: IEEE/Playwright → CrossRef → DBLP fallback')
+    parser.add_argument('input', nargs='*',
+                        help='DOI URLs (e.g. https://doi.org/10.1109/RE.2024.11), '
+                             'or JSON file from search_dblp.py (e.g. papers.json)')
+    parser.add_argument('--file', '-f', help='File with DOI URLs (one per line) or JSON from search_dblp.py')
+    parser.add_argument('--output', '-o', default=None, help='Output .bib file (default: stdout)')
+    parser.add_argument('--ieee', action='store_true',
+                        help='Use Playwright to fetch from IEEE Xplore (Cite This → BibTeX tab)')
+    parser.add_argument('--delay', type=float, default=0.3,
+                        help='Delay between CrossRef requests (default: 0.3s)')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Show per-entry source')
 
     args = parser.parse_args()
 
-    keys = list(args.keys)
+    # Collect DOIs from all sources
+    dois = []
+    papers_info = []  # (doi, title) for verbose output
 
+    # From positional args
+    for item in args.input:
+        if item.endswith('.json'):
+            # Treat as JSON file
+            papers = load_papers_from_json(item)
+            for p in papers:
+                doi = p.get('doi', '')
+                if doi:
+                    dois.append(('doi', doi))
+                    papers_info.append((doi, p.get('title', '')))
+        elif 'doi.org' in item:
+            doi = extract_doi_from_url(item)
+            dois.append(('doi', doi))
+            papers_info.append((doi, ''))
+        else:
+            # Treat as DBLP key
+            dois.append(('dblp', item))
+
+    # From --file
     if args.file:
-        with open(args.file) as f:
-            keys.extend([line.strip() for line in f if line.strip() and not line.startswith('#')])
+        if args.file.endswith('.json'):
+            papers = load_papers_from_json(args.file)
+            for p in papers:
+                doi = p.get('doi', '')
+                if doi:
+                    dois.append(('doi', doi))
+                    papers_info.append((doi, p.get('title', '')))
+        else:
+            with open(args.file) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    if 'doi.org' in line:
+                        doi = extract_doi_from_url(line)
+                        dois.append(('doi', doi))
+                        papers_info.append((doi, ''))
+                    else:
+                        dois.append(('dblp', line))
 
-    if args.search:
-        results = search_and_fetch_bibtex(args.search, venue=args.venue, year=str(args.year) if args.year else None)
-        for res in results:
-            print(f"# {res['key']}")
-            print(res['bib'])
-        return
-
-    if not keys:
+    if not dois:
         parser.print_help()
         return
 
-    output = []
-    for key in keys:
-        key = key.strip()
-        if not key:
-            continue
+    # Deduplicate by (type, value)
+    seen = set()
+    unique = []
+    for t, v in dois:
+        key = (t, v)
+        if key not in seen:
+            seen.add(key)
+            unique.append((t, v))
+    dois = unique
 
-        bib = fetch_bibtex(key, raw=args.raw)
+    # Fetch BibTeX
+    results = []
+    stats = {'ieee': 0, 'crossref': 0, 'dblp': 0, 'failed': 0}
 
-        if args.pages:
-            start, end, total = get_page_count(key)
-            if total:
-                print(f"# {key}: pages {start}-{end} ({total} pages)", file=sys.stderr)
+    for i, (dtype, dval) in enumerate(dois):
+        if dtype == 'doi':
+            bib, src = fetch_bibtex_for_doi(dval, use_ieee=args.ieee, delay=args.delay)
+        else:
+            bib, _ = fetch_bibtex_from_dblp(dval)
+            src = 'dblp'
+            if not bib:
+                src = 'not_found'
 
-        output.append(f"# {key}")
-        output.append(bib)
+        results.append(bib)
+        stats[src] = stats.get(src, 0) + 1
 
-    result = '\n'.join(output)
+        label = dval[:40]
+        if args.verbose:
+            status = '✓' if bib else '✗'
+            title = ''
+            for doi_, t_ in papers_info:
+                if doi_ == dval and t_:
+                    title = f'  # {t_[:60]}'
+                    break
+            print(f'[{i+1}/{len(dois)}] {status} {src}: {label}{title}', file=sys.stderr)
+        else:
+            status = '✓' if bib else '✗'
+            print(f'[{i+1}/{len(dois)}] {status} {src}: {label}', file=sys.stderr)
+
+        if args.delay > 0 and i < len(dois) - 1:
+            time.sleep(args.delay)
+
+    bibtex_output = '\n\n'.join(r for r in results if r)
 
     if args.output:
         with open(args.output, 'w') as f:
-            f.write(result)
-        print(f"Saved {len(keys)} entries to {args.output}")
+            f.write(bibtex_output)
+        total = len(dois)
+        print(f'\nSaved {len(dois)} entries to {args.output} '
+              f'(ieee={stats["ieee"]}, crossref={stats["crossref"]}, '
+              f'dblp={stats["dblp"]}, failed={stats["failed"]})', file=sys.stderr)
     else:
-        print(result)
+        print(bibtex_output)
+
+    if args.verbose:
+        print(f'\n# Stats: ieee={stats["ieee"]}, crossref={stats["crossref"]}, '
+              f'dblp={stats["dblp"]}, failed={stats["failed"]}', file=sys.stderr)
 
 
 if __name__ == '__main__':

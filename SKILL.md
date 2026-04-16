@@ -1,112 +1,166 @@
 ---
 name: paper-finding
-description: Find and retrieve academic papers from DBLP with CCF ranking filtering. Use whenever the user wants to search for papers on a topic, find CCF-A or CCF-B papers in Software Engineering or AI, do a literature review, search for papers by conference/journal, get BibTeX entries, or filter papers by year range, CCF rank, venue, or page count. Triggers on "find papers on X", "search for papers about Y", "search DBLP", "CCF-A papers", "requirements validation papers", "literature review", "get BibTeX", "fetch paper", "what papers exist on Z", or any academic paper search task.
+description: Find academic papers from DBLP with CCF ranking filtering and generate ready-to-use BibTeX + LaTeX. Use whenever the user wants to search for papers on a topic, find CCF-A or CCF-B papers in Software Engineering or AI, do a literature review, get BibTeX entries, or produce a .bib file and .tex file with \\cite{} commands. Triggers on "find papers on X", "search for papers about Y", "CCF-A papers", "requirements validation papers", "literature review", "get BibTeX", "fetch paper", "generate .bib and .tex", "save papers as BibTeX", or any academic paper search task.
 author: yylonly
-version: 0.2.0
+version: 0.5.0
 ---
 
-# Paper Finding Skill
+# Paper Finding Skill (v0.5)
 
-This skill finds academic papers using [DBLP](https://dblp.org/) — a free, open computer science bibliography with 6.5M+ papers — and filters them by CCF ranking, year, venue, and page count.
+Finds academic papers using [DBLP](https://dblp.org/) and generates `.bib` + `.tex` files ready for LaTeX.
 
 ## Bundled Scripts
 
-- `scripts/search_dblp.py` — Search DBLP with CCF venue filtering
-- `scripts/fetch_bibtex.py` — Fetch BibTeX entries by DBLP key
-- `scripts/generate_report.py` — One-shot: search, filter, fetch BibTeX, and save as `.md` + `.bib`
-- `references/ccf_venues.md` — CCF-A/B venue lists for SE and AI
-
-See the "Quick Reference" section at the bottom for one-liners.
+| Script | Purpose | Input | Output |
+|--------|---------|-------|--------|
+| `scripts/search_dblp.py` | Search DBLP for papers | keyword + filters | JSON (with `--json`) |
+| `scripts/filter_by_abstract.py` | Filter by abstract relevance | JSON from search_dblp.py | JSON (filtered) |
+| `scripts/fetch_bibtex.py` | Fetch BibTeX by DOI | JSON or DOI URLs | `.bib` file |
+| `scripts/bib2tex.py` | Merge bibs, generate LaTeX | `.bib` files | `.bib` (merged) + `.tex` |
 
 ---
 
-## Workflow: Finding Papers
+## Recommended Workflow
 
-### Step 1 — Determine the user's need
+Run the 4 scripts in sequence:
 
-Ask (or infer) these filters:
-
-| Filter | Options | Default |
-|--------|---------|---------|
-| Topic | Any search keywords | (required) |
-| CCF Category | SE, AI, or ALL | ALL |
-| CCF Rank | A, B, or ALL | ALL |
-| Year range | e.g. 2021–2025 | Last 5 years |
-| Page count | Minimum pages | None |
-
-### Step 2 — Use the search script
-
-**Basic search (last 5 years, all CCF):**
 ```bash
-python3 scripts/search_dblp.py "requirements validation"
+# Step 1: Search DBLP → JSON
+python3 scripts/search_dblp.py "requirements validation" --ccf SE --rank A --years 2021-2025 --json > papers.json
+
+# Step 2: Filter by abstract relevance (optional but recommended)
+python3 scripts/filter_by_abstract.py papers.json "requirements validation" -o filtered.json -v
+
+# Step 3: Fetch BibTeX → .bib
+python3 scripts/fetch_bibtex.py filtered.json -o refs.bib
+
+# Step 4: Merge + generate LaTeX → .bib + .tex
+python3 scripts/bib2tex.py refs.bib -o . --basename mypaper
 ```
 
-**CCF-A SE papers only:**
+---
+
+## Step 1: search_dblp.py
+
+Search DBLP for papers by keyword, filter by CCF rank/category/year.
+
 ```bash
+# Search only (human-readable table)
 python3 scripts/search_dblp.py "requirements validation" --ccf SE --rank A --years 2021-2025
-```
 
-**CCF-A AI papers:**
-```bash
-python3 scripts/search_dblp.py "requirements validation" --ccf AI --rank A --years 2021-2025
-```
-
-**JSON output for further processing:**
-```bash
+# Search + JSON output (for piping to fetch_bibtex.py)
 python3 scripts/search_dblp.py "requirements validation" --ccf SE --rank A --years 2021-2025 --json
 ```
 
-### Step 3 — Verify relevance via abstract
+**Options:**
 
-DBLP search is by title/keyword only — it matches titles containing your keywords. **Always verify relevance** by checking the abstract. Use one of:
+| Flag | Description |
+|------|-------------|
+| `--ccf SE\|AI\|ALL` | Filter by CCF category |
+| `--rank A\|B\|ALL` | Filter by CCF rank |
+| `--years YYYY-YYYY` | Year range |
+| `--hits N` | Max DBLP hits (default: 100) |
+| `--json` | Output JSON (for fetch_bibtex.py) |
+| `--enrich-doi` | Fetch missing DOIs from DBLP JSON (slow) |
+| `--doi-delay N` | Delay between DBLP DOI requests (default: 1.0s) |
 
-- **Semantic Scholar API** (free, good abstract coverage):
-  ```bash
-  curl "https://api.semanticscholar.org/graph/v1/paper/search?query=KEYWORD&limit=5&fields=title,abstract,year,venue"
-  ```
-- **CrossRef API** (less reliable for CS abstracts):
-  ```bash
-  curl "https://api.crossref.org/works?query=KEYWORD&rows=5"
-  ```
-- **Direct web search** — search for the title to find the paper page
-
-A paper is **relevant** if its abstract confirms it addresses the user's topic (not just mentions it in passing).
-
-### Step 4 — Check page count
-
-For filtering to full papers (>8 pages), check the page range:
-- Search the DBLP key on **ACM Digital Library** or **IEEE Xplore**
-- Or use the fetch script's `--pages` flag
-
-Typical page counts:
-- ICSE/FSE full papers: 10–12 pages
-- ICSE NIER/Companion: 4–6 pages (short papers)
-- RE (Requirements Engineering) journal: 20–30 pages
-- ASE/ISSTA: 10–12 pages
-
-### Step 5 — Fetch BibTeX
-
-Once you have the DBLP keys, fetch BibTeX:
-
-**Single paper:**
+DBLP search is **title-only**. Run multiple query variants for broader coverage:
 ```bash
-python3 scripts/fetch_bibtex.py conf/icse/Pan024
+python3 scripts/search_dblp.py "requirements validation" --json
+python3 scripts/search_dblp.py "requirements verification" --json
+python3 scripts/search_dblp.py "NLP requirements engineering" --json
+python3 scripts/search_dblp.py "LLM requirements engineering" --json
 ```
 
-**Multiple papers:**
+---
+
+## Step 2: filter_by_abstract.py
+
+Filter papers by abstract relevance using Semantic Scholar API. DBLP search is **title-only** — this step removes false positives (papers whose title matches but abstract doesn't address the topic).
+
 ```bash
-python3 scripts/fetch_bibtex.py conf/icse/Pan024 conf/icse/ChangGY23 conf/icse/MashkoorLE21
+python3 scripts/filter_by_abstract.py papers.json "requirements validation" -o filtered.json -v
 ```
 
-**With page counts:**
+**Options:**
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--min-overlap N` | Min fraction of query terms in abstract (0.0–1.0) | 0.15 |
+| `--scholar-delay N` | Delay between API requests (s) | 0.5 |
+
+**Relevance rules:**
+- **Title overlap ≥ 40%** → always keep
+- **Abstract has ≥ 15% of query terms** → keep
+- **Some title overlap but abstract empty** → keep (lenient)
+- Otherwise → drop
+
+If Semantic Scholar returns 429 rate-limit, falls back to title-overlap-only mode (still effective).
+
+---
+
+## Step 3: fetch_bibtex.py
+
+Fetch BibTeX for papers given a JSON file (from `search_dblp.py --json`) or individual DOI URLs.
+
 ```bash
-python3 scripts/fetch_bibtex.py conf/icse/Pan024 --pages
+# From JSON (output of search_dblp.py --json)
+python3 scripts/fetch_bibtex.py papers.json -o refs.bib
+
+# Individual DOI URLs
+python3 scripts/fetch_bibtex.py https://doi.org/10.1109/RE.2024.00011 -o refs.bib
+
+# Multiple .bib files via --file flag
+python3 scripts/fetch_bibtex.py --file refs1.bib --file refs2.bib -o merged.bib
+
+# With IEEE Playwright (Cite This → BibTeX tab)
+python3 scripts/fetch_bibtex.py papers.json --ieee -o refs.bib -v
 ```
 
-**Raw BibTeX (no cleanup):**
-```bash
-python3 scripts/fetch_bibtex.py conf/icse/Pan024 --raw
+**Pipeline:**
+
 ```
+DOI
+  → IEEE via Playwright (if --ieee)  [bypasses Cloudflare on IEEE Xplore]
+  → CrossRef API by DOI              [primary — reliable, no rate limits]
+  → DBLP .bib endpoint              [fallback — rate-limited]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--output, -o FILE` | Output .bib file |
+| `--ieee` | Use Playwright to fetch from IEEE Xplore (Cite This → BibTeX tab) |
+| `--delay N` | Delay between CrossRef requests (s, default: 0.3) |
+| `--verbose, -v` | Show source per entry |
+
+**IEEE Playwright note:** Requires `pip install playwright && playwright install chromium`. Uses `headless=False` to bypass Cloudflare protection. The browser opens visibly to perform the Cite This → BibTeX click automation.
+
+---
+
+## Step 4: bib2tex.py
+
+Merge multiple `.bib` files into one and generate a LaTeX `.tex` file with `\cite{}` for each entry.
+
+```bash
+# Merge two .bib files
+python3 scripts/bib2tex.py refs1.bib refs2.bib -o . --basename combined
+
+# Merge all .bib in current directory
+python3 scripts/bib2tex.py *.bib -o . --basename allpapers
+
+# Merge from a directory
+python3 scripts/bib2tex.py --file mybibdir -o . --basename merged
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--file, -f` | Additional .bib files (can be repeated or glob pattern) |
+| `--output DIR` | Output directory |
+| `--basename NAME` | Base filename (no ext) |
 
 ---
 
@@ -132,90 +186,44 @@ For the full list, see `references/ccf_venues.md`.
 
 ---
 
-## DBLP API One-Liners
+## Verify Relevance via Abstract
 
-When the bundled scripts aren't available, use these direct API calls:
+DBLP search is **title-only**. Always verify relevance by checking the abstract:
 
-### Search publications
 ```bash
-curl "https://dblp.org/search/publ/api?q=KEYWORD&format=json&h=50"
+curl "https://api.semanticscholar.org/graph/v1/paper/search?query=KEYWORD&limit=5&fields=title,abstract,year,venue"
 ```
 
-### Search with year filter
-```bash
-curl "https://dblp.org/search/publ/api?q=KEYWORD+year:2024&format=json&h=50"
-```
-
-### Search by author
-```bash
-curl "https://dblp.org/search/author/api?q=author:NAME&format=json&h=20"
-```
-
-### Fetch BibTeX by DBLP key
-```bash
-curl "https://dblp.org/rec/bib/CONF_OR_JOURNAL/KEY.bib"
-```
-
-### Fetch paper metadata (JSON)
-```bash
-curl "https://dblp.org/rec/KEY.json"
-```
+A paper is **relevant** if its abstract confirms it addresses the user's topic (not just mentions it in passing).
 
 ---
 
 ## Important Notes
 
-- **DBLP is free, no API key needed.** Be polite — add `--max-time` and delay between bulk requests.
-- **Verification ≠ Validation:** "Requirements verification" checks implementation against spec; "Requirements validation" checks spec against stakeholder needs. Both are valid topics — don't exclude papers that use "verification" in the title.
-- **Abstract-based relevance is critical** — DBLP keyword search only matches titles. A paper titled "InputGen" with "requirements validation" in the abstract but not the title would be missed by pure title search. Always cross-check abstracts.
-- **Venue matching in DBLP is strict** — DBLP uses specific abbreviations. "RE" matches "Requirements Engineering" but "REQUIREMENTS ENGINEERING" won't match "RE" in substring matching.
-- **Page counts** — ICSE NIER/Companion tracks are short papers (4–6 pages). If the user wants full papers, always check page counts.
+- **No API key needed** — DBLP, CrossRef, and IEEE are all free. The DBLP `.bib` endpoint is rate-limited; use CrossRef as the primary BibTeX source.
+- **Verification ≠ Validation** — "Requirements verification" checks implementation against spec; "Requirements validation" checks spec against stakeholder needs. Both are valid topics.
+- **Run multiple query variants** — DBLP title-only search misses papers. Use different keyword combinations: "requirements validation", "requirements verification", "NLP requirements engineering", "LLM requirements engineering", etc.
+- **Filter by abstract** — use `filter_by_abstract.py` to remove false positives. DBLP title-only search returns irrelevant papers (e.g. "Roll for Robot" was dropped for "AI for design" because its abstract didn't discuss AI design. Run it after search and before fetching BibTeX.
+- **Page counts** — ICSE NIER/Companion = 4–6 pages (short). RE full papers = 10–15 pages. Check the `pages` field after fetching.
+- **DBLP JSON API is unreliable** — DBLP's JSON endpoint returns 404 for some records. Use the DOI from the `ee` field as the primary lookup; only fall back to DBLP JSON when no DOI is available.
 
 ---
-
-## One-Shot Report Generator
-
-The `generate_report.py` script does everything in one command: search, filter by CCF rank/category/year, verify abstracts, fetch BibTeX (with rate-limit delay), and save as `.md` + `.bib`.
-
-**Basic usage:**
-```bash
-python3 scripts/generate_report.py "AI for Requirements Engineering" --ccf ALL --rank A --years 2023-2025
-```
-
-**Specify output directory and base filename:**
-```bash
-python3 scripts/generate_report.py "requirements validation" --ccf SE --rank A --years 2021-2025 --output ~/papers --basename req-validation-review
-```
-
-**Output:** Two files are saved:
-- `TOPIC.md` — Literature review with IEEE references, paper list grouped by CCF rank, and BibTeX embedded
-- `TOPIC.bib` — Raw BibTeX file for LaTeX / reference managers
-
-**Options:**
-| Flag | Description |
-|------|-------------|
-| `--ccf SE\|AI\|ALL` | Filter by CCF category (default: ALL) |
-| `--rank A\|B\|ALL` | Filter by CCF rank (default: ALL) |
-| `--years YYYY-YYYY` | Year range (default: last 5 years) |
-| `--hits N` | Max DBLP hits per query (default: 100) |
-| `--output DIR` | Output directory (default: current dir) |
-| `--basename NAME` | Base filename without extension |
 
 ## Quick Reference
 
 ```bash
-# One-shot: generate full report (.md + .bib) for a topic
-python3 scripts/generate_report.py "TOPIC" --ccf SE --rank A --years 2021-2025
+# Step 1: Search DBLP → JSON
+python3 scripts/search_dblp.py "TOPIC" --ccf SE --rank A --years 2021-2025 --json > papers.json
 
-# Search papers only (output JSON)
-python3 scripts/search_dblp.py "TOPIC" --ccf SE --rank A --years 2021-2025 --json
+# Step 2: Filter by abstract relevance (optional but recommended)
+python3 scripts/filter_by_abstract.py papers.json "TOPIC" -o filtered.json -v
 
-# Fetch BibTeX for known DBLP keys
-python3 scripts/fetch_bibtex.py conf/icse/Pan024 conf/icse/ChangGY23 -o refs.bib
+# Step 3: Fetch BibTeX → .bib
+python3 scripts/fetch_bibtex.py filtered.json -o refs.bib
 
-# Check abstracts on Semantic Scholar
-curl "https://api.semanticscholar.org/graph/v1/paper/search?query=TOPIC&limit=5&fields=title,abstract,year,venue"
+# Step 4: Merge + generate LaTeX → .bib + .tex
+python3 scripts/bib2tex.py refs.bib -o . --basename mypaper
 
-# Get CCF venue reference
-cat references/ccf_venues.md
+# IEEE via Playwright (bypasses Cloudflare)
+python3 scripts/fetch_bibtex.py filtered.json --ieee -o refs.bib -v
 ```

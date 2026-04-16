@@ -1,0 +1,44 @@
+{
+  "skill_name": "paper-finding",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "find papers about AI for requirements engineering, only CCF-A and CCF-B, paper length >= 8",
+      "expected_output": "A list of relevant CCF-A and CCF-B papers on AI for RE, with their BibTeX entries saved to a .bib file in the current directory.",
+      "files": [],
+      "expectations": [
+        "The output includes at least 1 CCF-B SE paper (RE conference papers on AI/LLM for RE)",
+        "A .bib file is created in the current directory",
+        "The BibTeX entries contain DOI, author, title, booktitle, year, and pages fields",
+        "Papers are from CCF-A or CCF-B venues only (ICSE, RE, etc.)",
+        "Papers are from 2021-2025"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "generate a literature review on LLM for requirements engineering, CCF-B SE, 2024-2025. Save output to /tmp/llm-re-review/",
+      "expected_output": "A .md literature review and .bib file saved to /tmp/llm-re-review/",
+      "files": [],
+      "expectations": [
+        "Two files are created: a .md report and a .bib file in /tmp/llm-re-review/",
+        "The report groups papers by CCF rank (CCF-A SE, CCF-B SE sections)",
+        "Each paper has a DOI link in the report",
+        "The BibTeX uses CrossRef source (verified by checking for 'RE63999' or 'RE59067' DOI prefixes in entries)",
+        "At least 2 papers are found from RE 2024-2025"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "fetch BibTeX for: conf/re/BarzaminiR22 conf/re/FengMYSBAMTBCCC24 conf/re/GuardadoPZRT25. Save to /tmp/fetch-test.bib",
+      "expected_output": "A BibTeX file at /tmp/fetch-test.bib with 3 entries",
+      "files": [],
+      "expectations": [
+        "A file /tmp/fetch-test.bib is created",
+        "The file contains at least 2 BibTeX entries (some may fail if rate-limited)",
+        "Each entry has @inproceedings type",
+        "Each entry has author, title, booktitle, year, and doi fields",
+        "The script uses CrossRef (DOI-based fetch) for at least one entry"
+      ]
+    }
+  ]
+}

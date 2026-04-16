@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Comprehensive DBLP paper search with CCF venue filtering.
+Step 1: Search DBLP for papers by keyword.
+Outputs: JSON list of papers with DOI URLs, suitable for piping to fetch_bibtex.py.
 
 Usage:
-    python3 search_dblp.py "requirements validation" --ccf SE --rank A --years 2021-2025
-    python3 search_dblp.py "deep learning testing" --ccf AI --rank B --years 2020-2025
+    python3 search_dblp.py "requirements validation" --ccf SE --rank A --years 2021-2025 --json
+    python3 search_dblp.py "LLM requirements" --ccf SE --rank B --years 2020-2025 --json > papers.json
 """
 
 import argparse
@@ -12,34 +13,26 @@ import json
 import subprocess
 import sys
 import urllib.parse
+import urllib.request
+import re
+import time
 from datetime import datetime
 
-# CCF Venue lists (from official CCF category lists)
-# Software Engineering / System Software / Programming Languages
+# CCF Venue lists
 CCF_A_SE_CONFS = {'ICSE', 'FSE', 'ISSTA', 'PLDI', 'POPL', 'SOSP', 'OOPSLA', 'OSDI', 'FM'}
-CCF_A_SE_JOURNALS = {'TOSEM', 'TSE', 'TOPLAS', 'TSC'}  # IEEE TPAMI is AI
-
-# CCF-B SE (conferences and journals)
+CCF_A_SE_JOURNALS = {'TOSEM', 'TSE', 'TOPLAS', 'TSC'}
 CCF_B_SE_CONFS = {'RE', 'CAiSE', 'ECOOP', 'ETAPS', 'ICPC', 'ICFP', 'LCTES', 'MoDELS', 'CP',
                    'ICSOC', 'SANER', 'ICSME', 'VMCAI', 'ICWS', 'Middleware', 'SAS', 'ESEM', 'ISSRE', 'HotOS'}
 CCF_B_SE_JOURNALS = {'ASE', 'ESE', 'IETS', 'IST', 'JFP', 'JSEP', 'RE', 'SCP', 'SoSyM', 'STVR', 'SPE',
-                       'JOURNAL OF SOFTWARE EVOLUTION', 'JOURNAL OF SYSTEMS AND SOFTWARE'}
-
-# CCF-A AI
+                      'JOURNAL OF SOFTWARE EVOLUTION', 'JOURNAL OF SYSTEMS AND SOFTWARE'}
 CCF_A_AI_CONFS = {'AAAI', 'NeurIPS', 'ACL', 'CVPR', 'ICCV', 'ICML', 'IJCAI', 'ECCV'}
 CCF_A_AI_JOURNALS = {'AI', 'TPAMI', 'IJCV', 'JMLR'}
-
-# CCF-B AI
 CCF_B_AI_CONFS = {'EMNLP', 'ECAI', 'ICRA', 'ICAPS', 'ICCBR', 'COLING', 'KR', 'UAI', 'AAMAS', 'PPSN', 'NAACL', 'COLT'}
 CCF_B_AI_JOURNALS = {'AAMAS', 'CL', 'CVIU', 'DKE', 'EC', 'TAC', 'TASLP', 'TCYB', 'TEC', 'TFS', 'TNNLS',
                       'IJAR', 'JAIR', 'JAR', 'JSLHR', 'ML', 'NC', 'NN', 'PR', 'TACL'}
-
-# Exclude false positives from venue matching
 EXCLUDE_KEYWORDS = {'REMOTE', 'SMARTGREENS', 'VEHITS', 'IFM', 'NFM', 'TALN', 'RECITAL',
-                     'ENASE', 'ITICSE', 'EQUITY', 'DIVERSITY', 'INCLUSION', 'FORMALISE',
-                     'AI ETHICS', 'PANAFRICON'}  # AI ETHICS contains AI but isn't a CCF venue
+                     'ENASE', 'ITICSE', 'EQUITY', 'DIVERSITY', 'INCLUSION', 'FORMALISE', 'AI ETHICS', 'PANAFRICON'}
 
-# Multi-token venues (match full name, not substring)
 MULTI_TOKEN_VENUES = {
     'IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE': ('CCF-A AI', 'journal'),
     'IEEE TRANSACTIONS ON SOFTWARE ENGINEERING': ('CCF-A SE', 'journal'),
@@ -63,65 +56,41 @@ MULTI_TOKEN_VENUES = {
     'PATTERN RECOGNITION': ('CCF-B AI', 'journal'),
 }
 
-ALL_CCF_VENUES = (CCF_A_SE_CONFS | CCF_B_SE_CONFS | CCF_A_SE_JOURNALS | CCF_B_SE_JOURNALS |
-                   CCF_A_AI_CONFS | CCF_B_AI_CONFS | CCF_A_AI_JOURNALS | CCF_B_AI_JOURNALS)
-
 
 def classify_venue(venue_upper: str) -> tuple:
-    """Classify a venue into (category, rank). Returns ('OTHER', '') if not CCF."""
-    # Check false positives
     if any(ex in venue_upper for ex in EXCLUDE_KEYWORDS):
         return 'OTHER', ''
-
-    # Check multi-token venues first (longest match wins)
     for vname, result in sorted(MULTI_TOKEN_VENUES.items(), key=lambda x: -len(x[0])):
         if vname in venue_upper:
             return result
-
-    # Split into tokens and check
     tokens = set(venue_upper.split())
-
-    # CCF-A SE - exact token match
-    match = tokens & CCF_A_SE_CONFS
-    if match:
-        return 'CCF-A SE', 'conference'
-    match = tokens & CCF_A_SE_JOURNALS
-    if match:
-        return 'CCF-A SE', 'journal'
-
-    # CCF-B SE - exact token match
-    match = tokens & CCF_B_SE_CONFS
-    if match:
-        return 'CCF-B SE', 'conference'
-    match = tokens & CCF_B_SE_JOURNALS
-    if match:
-        return 'CCF-B SE', 'journal'
-
-    # CCF-A AI - exact token match (NeurIPS needs special handling)
-    match = tokens & CCF_A_AI_CONFS
-    if match:
-        return 'CCF-A AI', 'conference'
-    match = tokens & CCF_A_AI_JOURNALS
-    if match:
-        return 'CCF-A AI', 'journal'
-
-    # CCF-B AI - exact token match
-    match = tokens & CCF_B_AI_CONFS
-    if match:
-        return 'CCF-B AI', 'conference'
-    match = tokens & CCF_B_AI_JOURNALS
-    if match:
-        return 'CCF-B AI', 'journal'
-
+    if tokens & CCF_A_SE_CONFS: return 'CCF-A SE', 'conference'
+    if tokens & CCF_A_SE_JOURNALS: return 'CCF-A SE', 'journal'
+    if tokens & CCF_B_SE_CONFS: return 'CCF-B SE', 'conference'
+    if tokens & CCF_B_SE_JOURNALS: return 'CCF-B SE', 'journal'
+    if tokens & CCF_A_AI_CONFS: return 'CCF-A AI', 'conference'
+    if tokens & CCF_A_AI_JOURNALS: return 'CCF-A AI', 'journal'
+    if tokens & CCF_B_AI_CONFS: return 'CCF-B AI', 'conference'
+    if tokens & CCF_B_AI_JOURNALS: return 'CCF-B AI', 'journal'
     return 'OTHER', ''
 
 
-def search_dblp(query: str, max_hits: int = 100) -> list:
-    """Search DBLP API and return list of paper dicts."""
+def extract_doi_from_ee(ee_url: str) -> str:
+    """Extract DOI from a publisher URL (e.g. https://doi.org/10.1109/RE.2024.123)."""
+    if not ee_url:
+        return ''
+    m = re.search(r'doi\.org/(10\.\d{4,}/[^\s]+)', ee_url)
+    if m:
+        return m.group(1).rstrip('/')
+    return ''
+
+
+def search_dblp_api(query: str, max_hits: int = 100) -> list:
+    """Search DBLP API, return list of hit dicts."""
     encoded_q = urllib.parse.quote(query)
     r = subprocess.run(
         ['curl', '-s', f'https://dblp.org/search/publ/api?q={encoded_q}&format=json&h={max_hits}'],
-        capture_output=True
+        capture_output=True, timeout=30
     )
     try:
         data = json.loads(r.stdout)
@@ -130,30 +99,37 @@ def search_dblp(query: str, max_hits: int = 100) -> list:
         return []
 
 
-def search_venue_prefix(venue: str, query: str, max_hits: int = 20) -> list:
-    """Search DBLP with venue:prefix query for targeted venue search."""
-    encoded_q = urllib.parse.quote(f"venue:{venue} {query}")
-    r = subprocess.run(
-        ['curl', '-s', f'https://dblp.org/search/publ/api?q={encoded_q}&format=json&h={max_hits}'],
-        capture_output=True
-    )
+def fetch_doi_from_dblp_json(dblp_key: str, timeout: int = 15) -> str:
+    """Fetch DOI from DBLP JSON API. Returns empty string if not found."""
     try:
-        data = json.loads(r.stdout)
-        return data.get('result', {}).get('hits', {}).get('hit', [])
+        url = f'https://dblp.org/rec/{dblp_key}.json'
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read())
+            doi = data.get('doi', '')
+            if not doi:
+                ext = data.get('externalids', {})
+                doi = ext.get('DOI', '') if isinstance(ext, dict) else ''
+            return doi
     except:
-        return []
+        return ''
 
 
 def parse_paper(hit: dict) -> dict:
-    """Parse a DBLP hit into a normalized paper dict."""
     info = hit['info']
-    venue_upper = info.get('venue', '').upper()
+    venue_val = info.get('venue', '')
+    if isinstance(venue_val, list):
+        venue_val = ' '.join(str(v) for v in venue_val)
+    venue_upper = str(venue_val).upper()
     category, vtype = classify_venue(venue_upper)
 
     authors_raw = info.get('authors', {}).get('author', [])
     if not isinstance(authors_raw, list):
         authors_raw = [authors_raw]
     authors = [a.get('text', str(a)) if isinstance(a, dict) else str(a) for a in authors_raw]
+
+    ee_url = info.get('ee', '')
+    doi = extract_doi_from_ee(ee_url)
 
     return {
         'title': info.get('title', ''),
@@ -163,6 +139,8 @@ def parse_paper(hit: dict) -> dict:
         'year': info.get('year', ''),
         'key': info.get('url', '').replace('https://dblp.org/rec/', ''),
         'dblp_url': info.get('url', ''),
+        'ee_url': ee_url,
+        'doi': doi,
         'category': category,
         'rank': category.split(' ')[0] if category else '',
         'type': vtype,
@@ -170,41 +148,27 @@ def parse_paper(hit: dict) -> dict:
 
 
 def filter_papers(papers: list, args) -> list:
-    """Filter papers by year range, CCF rank, CCF category."""
     filtered = []
     for p in papers:
-        # Year filter
         year = int(p.get('year') or 0)
         if args.year_from and year < args.year_from:
             continue
         if args.year_to and year > args.year_to:
             continue
-
-        # CCF rank filter
-        if args.rank:
-            rank = p.get('rank', '')
-            if args.rank.upper() not in rank:
+        if args.rank and args.rank.upper() != 'ALL':
+            if args.rank.upper() not in p.get('rank', ''):
                 continue
-
-        # CCF category filter
-        if args.ccf:
+        if args.ccf and args.ccf.upper() != 'ALL':
             ccf = args.ccf.upper()
             if ccf == 'SE' and 'SE' not in p.get('category', ''):
                 continue
             if ccf == 'AI' and 'AI' not in p.get('category', ''):
                 continue
-
-        # Page count filter (approximate - caller should verify)
-        # Page count filter - caller should filter after fetching page counts
-        pass
-
         filtered.append(p)
-
     return filtered
 
 
 def deduplicate(papers: list) -> list:
-    """Deduplicate by DBLP key."""
     seen = set()
     unique = []
     for p in papers:
@@ -214,94 +178,107 @@ def deduplicate(papers: list) -> list:
     return unique
 
 
-def print_results(papers: list, verbose: bool = False):
-    """Print papers in table format."""
-    if not papers:
-        print("No papers found matching criteria.")
-        return
+def enrich_missing_dois(papers: list, delay: float = 1.0) -> list:
+    """Fill in missing DOIs using DBLP JSON API (rate-limited, use delay)."""
+    enriched = []
+    for p in papers:
+        if p.get('doi'):
+            enriched.append(p)
+            continue
+        doi = fetch_doi_from_dblp_json(p['key'])
+        p = dict(p)
+        p['doi'] = doi
+        enriched.append(p)
+        if delay > 0:
+            time.sleep(delay)
+    return enriched
 
-    # Sort by rank, year, venue
+
+def print_table(papers: list):
+    if not papers:
+        print("No papers found.")
+        return
     rank_order = {'CCF-A SE': 0, 'CCF-A AI': 1, 'CCF-B SE': 2, 'CCF-B AI': 3, 'OTHER': 4}
     papers.sort(key=lambda p: (rank_order.get(p['category'], 4), p.get('year', ''), p.get('venue', '')))
-
-    print(f"\n{'Rank':<10} {'Year':<6} {'Venue':<25} {'Title':<50} {'Authors':<30} {'DBLP Key'}")
-    print("-" * 150)
-
+    print(f"\n{'Rank':<10} {'Year':<6} {'Venue':<25} {'Title':<50} {'DOI':<30}")
+    print("-" * 130)
     for p in papers:
         rank = p.get('category', 'OTHER')
         year = p.get('year', 'N/A')
         venue = p.get('venue', '')[:23]
         title = p.get('title', '')[:48]
-        authors = p.get('authors_str', '')[:28]
-        key = p.get('key', '')
-
-        print(f"{rank:<10} {year:<6} {venue:<25} {title:<50} {authors:<30} {key}")
-
+        doi = p.get('doi', '')[:28]
+        print(f"{rank:<10} {year:<6} {venue:<25} {title:<50} {doi:<30}")
     print(f"\nTotal: {len(papers)} papers")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Search DBLP with CCF venue filtering')
+    parser = argparse.ArgumentParser(description='Search DBLP: find papers by keyword, output JSON with DOI URLs')
     parser.add_argument('query', help='Search query')
     parser.add_argument('--ccf', choices=['SE', 'AI', 'ALL'], default='ALL',
-                        help='Filter by CCF category: SE (Software Engineering), AI (Artificial Intelligence), or ALL')
+                        help='Filter by CCF category')
     parser.add_argument('--rank', choices=['A', 'B', 'ALL'], default='ALL',
-                        help='Filter by CCF rank: A, B, or ALL')
-    parser.add_argument('--year-from', '--year_from', type=int, default=None,
-                        help='Filter papers from this year onward')
-    parser.add_argument('--year-to', '--year_to', type=int, default=None,
-                        help='Filter papers up to this year')
-    parser.add_argument('--years', default=None,
-                        help='Year range, e.g. 2020-2025')
-    parser.add_argument('--hits', type=int, default=100,
-                        help='Max results per query (default: 100)')
-    parser.add_argument('--verbose', action='store_true',
-                        help='Show extra debug info')
-    parser.add_argument('--json', action='store_true',
-                        help='Output raw JSON')
+                        help='Filter by CCF rank')
+    parser.add_argument('--year-from', dest='year_from', type=int, default=None)
+    parser.add_argument('--year-to', dest='year_to', type=int, default=None)
+    parser.add_argument('--years', help='Year range, e.g. 2020-2025')
+    parser.add_argument('--hits', type=int, default=100, help='Max DBLP hits (default: 100)')
+    parser.add_argument('--json', action='store_true', help='Output JSON (for piping to fetch_bibtex.py)')
+    parser.add_argument('--enrich-doi', action='store_true',
+                        help='Also fetch missing DOIs from DBLP JSON API (slow, rate-limited)')
+    parser.add_argument('--doi-delay', dest='doi_delay', type=float, default=1.0,
+                        help='Delay between DBLP DOI requests (default: 1.0s)')
+    parser.add_argument('--verbose', '-v', action='store_true')
 
     args = parser.parse_args()
 
-    # Parse year range
     if args.years:
         try:
             args.year_from, args.year_to = map(int, args.years.split('-'))
         except:
-            print("Error: --years should be in format YYYY-YYYY")
+            print("Error: --years should be YYYY-YYYY")
             sys.exit(1)
 
-    # Default: last 5 years
     if not args.year_from and not args.year_to:
         current_year = datetime.now().year
         args.year_from = current_year - 5
         args.year_to = current_year
 
     if args.verbose:
-        print(f"Searching DBLP for: '{args.query}'")
-        print(f"Filters: CCF={args.ccf}, Rank={args.rank}, Years={args.year_from}-{args.year_to}")
+        print(f"Searching: '{args.query}'  CCF={args.ccf} {args.rank}  {args.year_from}-{args.year_to}",
+              file=sys.stderr)
 
-    # Search DBLP
-    hits = search_dblp(args.query, max_hits=args.hits)
-
+    hits = search_dblp_api(args.query, max_hits=args.hits)
     if args.verbose:
-        print(f"DBLP returned {len(hits)} raw hits")
+        print(f"DBLP returned {len(hits)} hits", file=sys.stderr)
 
-    # Parse and classify
-    papers = []
-    for hit in hits:
-        p = parse_paper(hit)
-        papers.append(p)
+    papers = [parse_paper(h) for h in hits]
+    papers = filter_papers(papers, args)
+    papers = deduplicate(papers)
 
-    # Filter
-    filtered = filter_papers(papers, args)
-    filtered = deduplicate(filtered)
+    if args.enrich_doi:
+        papers = enrich_missing_dois(papers, delay=args.doi_delay)
 
     if args.json:
-        print(json.dumps(filtered, indent=2))
+        # Output JSON: each paper with doi_url field (https://doi.org/DOI)
+        output = []
+        for p in papers:
+            output.append({
+                'key': p['key'],
+                'title': p['title'],
+                'authors_str': p['authors_str'],
+                'year': p['year'],
+                'venue': p['venue'],
+                'category': p['category'],
+                'doi': p['doi'],
+                'doi_url': f"https://doi.org/{p['doi']}" if p['doi'] else '',
+                'dblp_url': p['dblp_url'],
+            })
+        print(json.dumps(output, indent=2, ensure_ascii=False))
     else:
-        print_results(filtered, verbose=args.verbose)
+        print_table(papers)
 
-    return filtered
+    return papers
 
 
 if __name__ == '__main__':
